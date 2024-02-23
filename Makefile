@@ -1,10 +1,10 @@
 DOCKERHUB_USERNAME=josietuong
-IMAGE_VERSION=v0.1
+IMAGE_VERSION=amd64
 IMAGE_NAME=scrnaseq
-
+PLAT=linux/amd64
 # build docker image
 build:
-        docker build -t $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION) .
+        docker build --platform=${PLAT} -t $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION) .
 
 # run interactive docker image
 run:
