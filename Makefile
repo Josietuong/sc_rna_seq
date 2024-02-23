@@ -17,4 +17,3 @@ push:
 sockeye_pull:
         module load apptainer; \
         apptainer pull --name scrnaseq.sif docker://$(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
-
