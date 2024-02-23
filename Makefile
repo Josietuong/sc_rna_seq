@@ -1,20 +1,20 @@
-DOCKERHUB_USERNAME=Josietuong
-IMAGE_VERSION=amd64
-IMAGE_NAME=snrnaseq
-PLAT=linux/amd64
+DOCKERHUB_USERNAME=josietuong
+IMAGE_VERSION=v0.1
+IMAGE_NAME=scrnaseq
 
 # build docker image
 build:
-	docker build --platform=${PLAT} -t $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION) .
+        docker build -t $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION) .
 
 # run interactive docker image
 run:
-	docker run -it -v /Users/josietuong/Desktop/snrnaseq:/home $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
+        docker run -it -v /Users/josietuong/scrnaseq:/home $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
 
 # push docker image to dockerhub
 push:
-	docker push $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
+        docker push $(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
 
 sockeye_pull:
-	module load apptainer; \
-	apptainer pull --name snrnaseq.sif docker://$(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
+        module load apptainer; \
+        apptainer pull --name scrnaseq.sif docker://$(DOCKERHUB_USERNAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
+
