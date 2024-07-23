@@ -1,0 +1,574 @@
+---
+title: "Cell type annotation"
+author: "Milad Vahedi"
+date: "2024-06-07"
+output: html_document
+---
+try this script with the functions from clustermole
+load libraries
+
+```{r}
+BiocManager::install("EasyCellType")
+
+library(BiocManager)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(ggsci)
+library(clustermole)
+library(future)
+library(reticulate)
+presto <- import("presto")
+
+library(EasyCellType)
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+
+set.seed(2)
+```
+
+Set your directory
+
+```{r}
+integ_dir <- "~/from_server/integ"
+setwd(integ_dir)
+```
+
+Data
+
+```{r}
+#Tissue <- readRDS(file = paste0(integ_dir,"umap.rds"))
+Tissue <- readRDS(file = '~/from_server/integ/umap.rds')
+DefaultAssay(Tissue) <- "RNA"
+Tissue <- NormalizeData(object = Tissue, normalization.method = "LogNormalize")
+Tissue <- JoinLayers(Tissue)
+```
+
+# clustermole
+How to know that clusters in 1 method is the same to the other method? in other word, how to know if g0 in clutermole is the same as g1 in cell ann celldex?
+Marker gene analysis
+
+```{r}
+levels(Idents(Tissue))
+```
+
+Enrichment analysis
+
+```{r}
+# Calculate the average expression levels for each cell type.
+avg_exp_mat <- AverageExpression(Tissue)
+# Convert to a regular matrix and log-transform.
+avg_exp_mat <- as.matrix(avg_exp_mat$RNA)
+avg_exp_mat <- log1p(avg_exp_mat)
+# Preview the expression matrix.
+avg_exp_mat[1:5, 1:5]
+# Run enrichment of all cell type signatures across all clusters.
+enrich_tbl <- clustermole_enrichment(expr_mat = avg_exp_mat, species = "mm")
+```
+
+### Cluster 0 marker gene analysis
+
+```{r}
+markers_df_0 <- FindMarkers(Tissue, ident.1 = "0", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_0 <- head(rownames(markers_df_0), 25)
+markers_0
+write.csv(markers_0, file = "markers_0.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_0 <- clustermole_overlaps(genes = markers_0, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_0, 15)
+```
+
+### cluster 0 enrichment analysis
+
+```{r}
+enrich_0 <- enrich_tbl %>%
+  filter(cluster == "g0") %>%
+  head(15)
+
+enrich_0
+```
+
+### Cluster 1 marker gene analysis
+
+```{r}
+markers_df_1 <- FindMarkers(Tissue, ident.1 = "1", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_1 <- head(rownames(markers_df_1), 25)
+markers_1
+write.csv(markers_1, file = "markers_1.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_1 <- clustermole_overlaps(genes = markers_1, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_1, 15)
+```
+
+### cluster 1 enrichment analysis
+
+```{r}
+enrich_1 <- enrich_tbl %>%
+  filter(cluster == "g1") %>%
+  head(15)
+
+enrich_1
+```
+
+### Cluster 2 marker gene analysis
+
+```{r}
+markers_df_2 <- FindMarkers(Tissue, ident.1 = "2", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_2 <- head(rownames(markers_df_2), 25)
+markers_2
+write.csv(markers_2, file = "markers_2.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_2 <- clustermole_overlaps(genes = markers_2, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_2, 15)
+```
+
+### cluster 2 enrichment analysis
+
+```{r}
+enrich_2 <- enrich_tbl %>%
+  filter(cluster == "g2") %>%
+  head(15)
+
+enrich_2
+```
+
+### Cluster 3 marker gene analysis
+
+```{r}
+markers_df_3 <- FindMarkers(Tissue, ident.1 = "3", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_3 <- head(rownames(markers_df_3), 25)
+markers_3
+write.csv(markers_3, file = "markers_3.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_3 <- clustermole_overlaps(genes = markers_3, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_3, 15)
+```
+
+### cluster 3 enrichment analysis
+
+```{r}
+enrich_3 <- enrich_tbl %>%
+  filter(cluster == "g3") %>%
+  head(15)
+
+enrich_3
+```
+
+### Cluster 4 marker gene analysis
+
+```{r}
+markers_df_4 <- FindMarkers(Tissue, ident.1 = "4", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_4 <- head(rownames(markers_df_4), 25)
+markers_4
+write.csv(markers_4, file = "markers_4.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_4 <- clustermole_overlaps(genes = markers_4, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_4, 15)
+```
+
+### cluster 4 enrichment analysis
+
+```{r}
+enrich_4 <- enrich_tbl %>%
+  filter(cluster == "g4") %>%
+  head(15)
+
+enrich_4
+```
+
+### Cluster 5 marker gene analysis
+
+```{r}
+markers_df_5 <- FindMarkers(Tissue, ident.1 = "5", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_5 <- head(rownames(markers_df_5), 25)
+markers_5
+write.csv(markers_5, file = "markers_5.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_5 <- clustermole_overlaps(genes = markers_5, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_5, 15)
+```
+
+### cluster 5 enrichment analysis
+
+```{r}
+enrich_5 <- enrich_tbl %>%
+  filter(cluster == "g5") %>%
+  head(15)
+
+enrich_5
+```
+
+### Cluster 6 marker gene analysis
+
+```{r}
+markers_df_6 <- FindMarkers(Tissue, ident.1 = "6", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_6 <- head(rownames(markers_df_6), 25)
+markers_6
+write.csv(markers_6, file = "markers_6.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_6 <- clustermole_overlaps(genes = markers_6, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_6, 15)
+```
+
+### cluster 6 enrichment analysis
+
+```{r}
+enrich_6 <- enrich_tbl %>%
+  filter(cluster == "g6") %>%
+  head(15)
+
+enrich_6
+```
+
+### Cluster 7 marker gene analysis
+
+```{r}
+markers_df_7 <- FindMarkers(Tissue, ident.1 = "7", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_7 <- head(rownames(markers_df_7), 25)
+markers_7
+write.csv(markers_7, file = "markers_7.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_7 <- clustermole_overlaps(genes = markers_7, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_7, 15)
+```
+
+### cluster 7 enrichment analysis
+
+```{r}
+enrich_7 <- enrich_tbl %>%
+  filter(cluster == "g7") %>%
+  head(15)
+
+enrich_7
+```
+
+### Cluster 8 marker gene analysis
+
+```{r}
+markers_df_8 <- FindMarkers(Tissue, ident.1 = "8", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_8 <- head(rownames(markers_df_8), 25)
+markers_8
+write.csv(markers_8, file = "markers_8.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_8 <- clustermole_overlaps(genes = markers_8, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_8, 15)
+```
+
+### cluster 8 enrichment analysis
+
+```{r}
+enrich_8 <- enrich_tbl %>%
+  filter(cluster == "g8") %>%
+  head(15)
+
+enrich_8
+```
+
+### Cluster 9 marker gene analysis
+
+```{r}
+markers_df_9 <- FindMarkers(Tissue, ident.1 = "9", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_9 <- head(rownames(markers_df_9), 25)
+markers_9
+write.csv(markers_9, file = "markers_9.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_9 <- clustermole_overlaps(genes = markers_9, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_9, 15)
+```
+
+### cluster 9 enrichment analysis
+
+```{r}
+enrich_9 <- enrich_tbl %>%
+  filter(cluster == "g9") %>%
+  head(15)
+
+enrich_9
+```
+
+### Cluster 10 marker gene analysis
+
+```{r}
+markers_df_10 <- FindMarkers(Tissue, ident.1 = "10", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_10 <- head(rownames(markers_df_10), 25)
+markers_10
+write.csv(markers_10, file = "markers_10.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_10 <- clustermole_overlaps(genes = markers_10, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_10, 15)
+```
+
+### cluster 10 enrichment analysis
+
+```{r}
+enrich_10 <- enrich_tbl %>%
+  filter(cluster == "g10") %>%
+  head(15)
+
+enrich_10
+```
+
+### Cluster 11 marker gene analysis
+
+```{r}
+markers_df_11 <- FindMarkers(Tissue, ident.1 = "11", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_11 <- head(rownames(markers_df_11), 25)
+markers_11
+write.csv(markers_11, file = "markers_11.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_11 <- clustermole_overlaps(genes = markers_11, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_11, 15)
+```
+
+### cluster 11 enrichment analysis
+
+```{r}
+enrich_11 <- enrich_tbl %>%
+  filter(cluster == "g11") %>%
+  head(15)
+
+enrich_11
+```
+
+### Cluster 12 marker gene analysis
+
+```{r}
+markers_df_12 <- FindMarkers(Tissue, ident.1 = "12", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_12 <- head(rownames(markers_df_12), 25)
+markers_12
+write.csv(markers_12, file = "markers_12.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_12 <- clustermole_overlaps(genes = markers_12, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_12, 15)
+```
+
+### cluster 12 enrichment analysis
+
+```{r}
+enrich_12 <- enrich_tbl %>%
+  filter(cluster == "g12") %>%
+  head(15)
+
+enrich_12
+```
+
+### Cluster 13 marker gene analysis
+
+```{r}
+markers_df_13 <- FindMarkers(Tissue, ident.1 = "13", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_13 <- head(rownames(markers_df_13), 25)
+markers_13
+write.csv(markers_13, file = "markers_13.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_13 <- clustermole_overlaps(genes = markers_13, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_13, 15)
+```
+
+### cluster 13 enrichment analysis
+
+```{r}
+enrich_13 <- enrich_tbl %>%
+  filter(cluster == "g13") %>%
+  head(15)
+
+enrich_13
+```
+
+### Cluster 14 marker gene analysis
+
+```{r}
+markers_df_14 <- FindMarkers(Tissue, ident.1 = "14", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_14 <- head(rownames(markers_df_14), 25)
+markers_14
+write.csv(markers_14, file = "markers_14.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_14 <- clustermole_overlaps(genes = markers_14, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_14, 15)
+```
+
+### cluster 14 enrichment analysis
+
+```{r}
+enrich_14 <- enrich_tbl %>%
+  filter(cluster == "g14") %>%
+  head(15)
+
+enrich_14
+```
+
+### Cluster 15 marker gene analysis
+
+```{r}
+markers_df_15 <- FindMarkers(Tissue, ident.1 = "15", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_15 <- head(rownames(markers_df_15), 25)
+markers_15
+write.csv(markers_15, file = "markers_15.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_15 <- clustermole_overlaps(genes = markers_15, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_15, 15)
+```
+
+### cluster 15 enrichment analysis
+
+```{r}
+enrich_15 <- enrich_tbl %>%
+  filter(cluster == "g15") %>%
+  head(15)
+
+enrich_15
+```
+
+### Cluster 16 marker gene analysis
+
+```{r}
+markers_df_16 <- FindMarkers(Tissue, ident.1 = "16", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_16 <- head(rownames(markers_df_16), 25)
+markers_16
+write.csv(markers_16, file = "markers_16.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_16 <- clustermole_overlaps(genes = markers_16, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_16, 15)
+```
+
+### cluster 16 enrichment analysis
+
+```{r}
+enrich_16 <- enrich_tbl %>%
+  filter(cluster == "g16") %>%
+  head(15)
+
+enrich_16
+```
+
+### Cluster 17 marker gene analysis
+
+```{r}
+markers_df_17 <- FindMarkers(Tissue, ident.1 = "17", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_17 <- head(rownames(markers_df_17), 25)
+markers_17
+write.csv(markers_17, file = "markers_17.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_17 <- clustermole_overlaps(genes = markers_17, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_17, 15)
+```
+
+### cluster 17 enrichment analysis
+
+```{r}
+enrich_17 <- enrich_tbl %>%
+  filter(cluster == "g17") %>%
+  head(15)
+
+enrich_17
+```
+
+### Cluster 18 marker gene analysis
+
+```{r}
+markers_df_18 <- FindMarkers(Tissue, ident.1 = "18", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_18 <- head(rownames(markers_df_18), 25)
+markers_18
+write.csv(markers_18, file = "markers_18.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_18 <- clustermole_overlaps(genes = markers_18, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_18, 15)
+```
+
+### cluster 18 enrichment analysis
+
+```{r}
+enrich_18 <- enrich_tbl %>%
+  filter(cluster == "g18") %>%
+  head(15)
+
+enrich_18
+```
+
+### Cluster 19 marker gene analysis
+
+```{r}
+markers_df_19 <- FindMarkers(Tissue, ident.1 = "19", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_19 <- head(rownames(markers_df_19), 25)
+markers_19
+write.csv(markers_19, file = "markers_19.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_19 <- clustermole_overlaps(genes = markers_19, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_19, 15)
+```
+
+### cluster 19 enrichment analysis
+
+```{r}
+enrich_19 <- enrich_tbl %>%
+  filter(cluster == "g19") %>%
+  head(15)
+
+enrich_19
+```
+
+### Cluster 20 marker gene analysis
+
+```{r}
+markers_df_20 <- FindMarkers(Tissue, ident.1 = "20", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_20 <- head(rownames(markers_df_20), 25)
+markers_20
+write.csv(markers_20, file = "markers_20.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_20 <- clustermole_overlaps(genes = markers_20, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_20, 15)
+```
+
+### cluster 20 enrichment analysis
+
+```{r}
+enrich_20 <- enrich_tbl %>%
+  filter(cluster == "g20") %>%
+  head(15)
+
+enrich_20
+```
+
+### Cluster 21 marker gene analysis
+
+```{r}
+markers_df_21 <- FindMarkers(Tissue, ident.1 = "21", min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+markers_21 <- head(rownames(markers_df_21), 25)
+markers_21
+write.csv(markers_21, file = "markers_21.csv", row.names = TRUE)
+# Check the overlap of B-cell markers with all clustermole cell type signatures.
+overlaps_tbl_21 <- clustermole_overlaps(genes = markers_21, species = "mm")
+# Check the top scoring cell types corresponding to the B-cell cluster markers
+head(overlaps_tbl_21, 15)
+```
+
+### cluster 21 enrichment analysis
+
+```{r}
+enrich_21 <- enrich_tbl %>%
+  filter(cluster == "g21") %>%
+  head(15)
+
+enrich_21
+```
+
