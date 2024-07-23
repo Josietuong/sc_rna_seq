@@ -1,0 +1,207 @@
+---
+title: "Integration"
+output: html_document
+date: "2024-06-20"
+---
+
+This step is resource intensive and you need to run it on server.
+open terminal, use ctrl+Alt+Ent to run the codes in terminal and connect to the server
+```{UNIX}
+ssh jtuong@sockeye.arc.ubc.ca
+```
+
+
+deactivate conda, set your directory, 
+```{UNIX}
+conda deactivate
+cd /scratch/st-gkoelwyn-1/jtuong/seurat
+module load apptainer
+apptainer shell bioconductor_docker_latest.sif
+R
+```
+set the lib path
+```{r}
+.libPaths('/scratch/st-gkoelwyn-1/jtuong/seurat/Rlib')
+```
+load libraries
+```{r}
+
+install.packages("Rserve", type = "source")
+install.packages("BiocManager")
+install.packages("Seurat")
+install.packages("spam")
+install.packages("SeuratObject")
+install.packages("RSpectra")
+installed.packages()
+
+library(BiocManager)
+library(RSpectra)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(future)
+library(RColorBrewer)
+library(SeuratData)
+library(patchwork)
+library(Rserve)
+set.seed(1234)
+```
+
+Make a new directory, named "integration", and in this directory copy all the afPCR.rds files, obtained from QC step, within a directory names "afPCR".
+
+```{r}
+integ_dir <- "~/Mouse_data/intergration/"
+setwd(integ_dir)
+```
+
+```{r}
+samples <- c('OC', 'OE', 'YC', 'YE')
+for (i in c(1:4)) {
+ tmp <- readRDS(file = paste0(integ_dir,"afPCR/",samples[i],"_afPCR.rds"))
+ assign(samples[i],tmp)
+}
+```
+
+
+```{r}
+getwd()
+dir.create(paste0(integ_dir,"integ"))
+knitr::opts_chunk$set(echo = TRUE)
+setwd(paste0(integ_dir,"integ"))
+getwd()
+
+
+int.list <- list(get(samples[1]),get(samples[2]),get(samples[3]),get(samples[4]))
+
+# setup parallel analysis 
+makeClusterPSOCK(availableCores())
+plan("multicore", workers = 20)
+options(future.globals.maxSize = 1024^6^20)
+plan()
+
+
+int.features <- SelectIntegrationFeatures(object.list = int.list,
+                                          nfeatures = 3000)
+int.list <- PrepSCTIntegration(object.list = int.list, 
+                               anchor.features = int.features)
+
+# Here we actually do the integration. Seurat does it in two steps:
+# step 1
+int.anchors <- FindIntegrationAnchors(object.list = int.list, 
+                                      normalization.method = "SCT",
+                                      anchor.features = int.features)
+
+saveRDS(int.anchors, paste0(integ_dir, "integ/int_anchors.rds"))
+
+# step 2
+exercise <- IntegrateData(anchorset = int.anchors,
+                          normalization.method = "SCT")
+
+DefaultAssay(exercise) <- "integrated"
+saveRDS(exercise, paste0(integ_dir, "integ/int_seu.rds"))
+
+# basic processing and visualization of the uncorrected dataset:
+
+DefaultAssay(exercise) <- "RNA"
+exercise <- NormalizeData(exercise, verbose = F)
+exercise <- FindVariableFeatures(exercise, selection.method = "vst", nfeatures = 3000, verbose = F)
+exercise <- ScaleData(exercise, verbose = F)
+
+exercise <- RunPCA(exercise,npcs = 30, verbose = FALSE)
+
+pdf(paste0(integ_dir, "integ/pca_heatmap.pdf"), height=20, width=10)
+DimHeatmap(exercise, dims = 1:30, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf(paste0(integ_dir, "integ/pca_elbow.pdf"), height=5, width=8)
+p <- ElbowPlot(exercise, ndims=30)
+print(p)
+dev.off()
+
+saveRDS(exercise, file = paste0(integ_dir, "integ/beforePC.rds"))
+
+exercise <- RunUMAP(exercise, reduction = "pca", dims = 1:30)
+
+pdf(paste0(integ_dir, "integ/umap_sample.pdf"),width=8,height=6)
+DimPlot(exercise, reduction = "umap", label = TRUE)
+DimPlot(exercise, reduction = "umap", pt.size = 0.4, group.by = "sample")
+dev.off()
+```
+
+```{r}
+# Now we cluster the integrated matrix and look how clusters are distributed between the 4 sets:
+exercise <- readRDS(file = paste0(integ_dir,"integ/beforePC.rds"))
+
+# clustering parameters
+# min.dist = make the dots closer 
+# spread = make clusters separate from each other
+exercise <- RunUMAP(exercise, dims = 1:30) #, spread=3, min.dist=0.2)
+exercise <- FindNeighbors(exercise, reduction = "pca", dims = 1:30, k.param = 10)
+exercise <- FindClusters(exercise) #, resolution = 2.2)
+                         
+plot <- DimPlot(exercise, reduction = "umap", label = TRUE,pt.size = 0.1,raster = FALSE)
+ggsave(file = paste0(integ_dir,"integ/umap.pdf"), plot = plot, width = 8, height = 6)
+pdf(file = paste0(integ_dir,"integ/umap_sample_single.pdf"),width=28,height=12)
+DimPlot(exercise, reduction = "umap", split.by = "sample",pt.size = 0.1,label.size = 6,ncol=4,raster = FALSE)
+dev.off()
+
+table(exercise[[]]$seurat_clusters)
+
+count_table <- table(exercise@meta.data$seurat_clusters, 
+                     exercise@meta.data$orig.ident)
+write.csv(count_table, file = paste0(integ_dir,"integ/count_table.csv"), row.names = F, quote = F)
+
+# to show the contribution of each sample in each cluster we need a function:
+plot_integrated_clusters = function (srat) { 
+  ## take an integrated Seurat object, plot distributions over orig.ident
+  library(Seurat)
+  library(patchwork)
+  library(ggplot2)
+  library(reshape2)
+  library(RColorBrewer)
+  
+  
+  count_table <- table(srat@meta.data$seurat_clusters, srat@meta.data$orig.ident)
+  count_mtx   <- as.data.frame.matrix(count_table)
+  count_mtx$cluster <- rownames(count_mtx)
+  melt_mtx    <- melt(count_mtx)
+  melt_mtx$cluster <- as.factor(melt_mtx$cluster)
+
+  cluster_size   <- aggregate(value ~ cluster, data = melt_mtx, FUN = sum)
+  
+  sorted_labels <- paste(sort(as.integer(levels(cluster_size$cluster)),decreasing = T))
+  cluster_size$cluster <- factor(cluster_size$cluster,levels = sorted_labels)
+  melt_mtx$cluster <- factor(melt_mtx$cluster,levels = sorted_labels)
+  
+  colnames(melt_mtx)[2] <- "dataset"
+  
+  
+  p1 <- ggplot(cluster_size, aes(y= cluster,x = value)) + geom_bar(position="dodge", stat="identity",fill = "grey60") + 
+    theme_bw() + scale_x_log10() + xlab("Cells per cluster, log10 scale") + ylab("")
+  p2 <- ggplot(melt_mtx,aes(x=cluster,y=value,fill=dataset)) + 
+    geom_bar(position="fill", stat="identity") + theme_bw() + coord_flip() + 
+    scale_fill_brewer(palette = "Set2") +
+    ylab("Fraction of cells in each dataset") + xlab("Cluster number") + theme(legend.position="top")
+  
+  p2 + p1 + plot_layout(widths = c(3,1))
+  }
+
+pdf(file = paste0(integ_dir,"integ/umap_sample_contrib.pdf"),width=28,height=12)
+plot_integrated_clusters(exercise)
+dev.off()
+
+saveRDS(exercise, file = paste0(integ_dir,"integ/umap.rds"))
+
+# let's see clusters in each sample separately
+Tissue <- exercise
+saveRDS(Tissue, file = paste0(integ_dir,"integ/umap.rds'"))
+
+pdf(paste0(integ_dir,"integ/umap_group.pdf"),width=8,height=6)
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample",raster=FALSE, cols= c('#E88B88','#D8281D','#45549A','#0B3582'))
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample",raster=FALSE, cols= c('#E88B88',"NA","NA","NA"))
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample", raster=FALSE,cols= c("NA",'#D8281D',"NA","NA"))
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample", raster=FALSE,cols= c("NA",'NA',"#45549A","NA"))
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample", raster=FALSE,cols= c("NA",'NA',"NA","#0B3582"))
+dev.off()
+```
