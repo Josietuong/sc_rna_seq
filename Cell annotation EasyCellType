@@ -1,0 +1,106 @@
+---
+title: "Cell type annotation EasyCellType"
+author: "Milad Vahedi"
+date: "2024-06-24"
+output: html_document
+---
+
+load libraries
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(ggsci)
+library(clustermole)
+library(future)
+library(reticulate)
+presto <- import("presto")
+
+library(EasyCellType)
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+
+set.seed(2)
+```
+
+Set your directory
+
+```{r}
+integ_dir <- '/Users/josietuong/from_server/integ/'
+setwd(integ_dir)
+```
+
+Data
+
+```{r}
+Tissue <- readRDS(file = paste0(integ_dir,"umap.rds"))
+DefaultAssay(Tissue) <- "RNA"
+Tissue <- NormalizeData(object = Tissue, normalization.method = "LogNormalize")
+Tissue <- JoinLayers(Tissue)
+```
+
+# **EasyCellType**
+
+Find deferentially expressed features
+
+```{r}
+markers <- FindAllMarkers(Tissue, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+Now we get the expressed markers for each cluster. We then convert the gene symbols to Entrez IDs.
+
+```{r}
+# org.Mm.eg.d for mice and org.Hs.eg.db for human data
+markers$entrezid <- mapIds(org.Mm.eg.db,
+                           keys=markers$gene, #Column containing Ensembl gene ids
+                           column="ENTREZID",
+                           keytype="SYMBOL",
+                           multiVals="first")
+#The na.omit function removes any rows in the markers data frame that contain NA values, ensuring that only rows with valid Entrez IDs are retained.
+markers <- na.omit(markers)
+
+```
+
+The input for EasyCellType package should be a data frame containing Entrez IDs, clusters and expression scores. The order of columns should follow this rule. In each cluster, the gene should be sorted by the expression score.
+
+```{r}
+library(dplyr)
+markers_sort <- data.frame(gene=markers$entrezid, 
+                           cluster=markers$cluster, 
+                      score=markers$avg_log2FC) %>% 
+  group_by(cluster) %>% 
+  mutate(rank = rank(score),  
+         ties.method = "random") %>% 
+  arrange(desc(rank)) 
+input.d <- as.data.frame(markers_sort[, 1:3])
+```
+
+Now we can call the annot function to run annotation analysis.
+
+```{r}
+data(clustermole_tissue)
+data(cellmarker_tissue)
+data(panglao_tissue)
+annot.GSEA <- easyct(input.d, db="cellmarker", 
+                     species="Mouse",
+                    tissue=c("Blood","Peripheral blood"), 
+                    p_cut=0.5,
+                    test="GSEA")
+```
+
+We used the GSEA approach to do the annotation. In our package, we use GSEA function in clusterProfiler package(Wu et al. 2021) to conduct the enrichment analysis. You can replace ‘GSEA’ with ‘fisher’ if you would like to use Fisher exact test to do the annotation. The candidate tissues can be seen using data(cellmarker_tissue), data(clustermole_tissue) and data(panglao_tissue).
+
+The dot plot showing the overall annotation results can be created by
+
+```{r}
+plot_dot <- plot_dot(test="GSEA", annot.GSEA)
+ggsave(filename = 'plot_dot_GSEA_EasyCellType.pdf', width = 10, height = 10)
+```
+
+Bar plot can be created by
+
+```{r}
+plot_bar(test="GSEA", annot.GSEA)
+
+```
