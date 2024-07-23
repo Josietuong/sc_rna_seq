@@ -1,0 +1,305 @@
+---
+title: "QC_mouse_data"
+output: html_document
+date: "2024-06-20"
+---
+
+```{UNIX}
+ssh jtuong@sockeye.arc.ubc.ca
+```
+
+
+deactivate conda, set your directory, 
+```{UNIX}
+conda deactivate
+cd /scratch/st-gkoelwyn-1/milad/seurat
+module load apptainer
+apptainer shell bioconductor_docker_latest.sif
+R
+```
+set the lib path
+```{r}
+.libPaths('/scratch/st-gkoelwyn-1/milad/seurat/Rlib')
+```
+## Packages and Libraries
+## Note: SoupX is installed in personal library: /Users/josietuong/Library/R/arm64/4.4/library
+
+```{r}
+# Install the remotes package if not already installed
+install.packages("remotes")
+
+# Use remotes to install SeuratData from GitHub
+remotes::install_github("satijalab/seurat-data")
+# Use remotes to install DoubletFinder from GitHub
+remotes::install_github('chris-mcginnis-ucsf/DoubletFinder', force = TRUE)
+
+install.packages('SoupX')
+install.packages('readr')
+BiocManager::install("GenomicRanges")
+BiocManager::install("DropletUtils", force = TRUE)
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(DoubletFinder)
+library(future)
+library(RColorBrewer)
+library(SeuratData)
+library(patchwork)
+library(SoupX)
+library(readr)
+library(DropletUtils)
+```
+
+```{r}
+## checking if a package is installed
+if ("SoupX" %in% rownames(installed.packages())) {
+  cat("SoupX is installed.\n")
+} else {
+  cat("SoupX is not installed.\n")
+}
+```
+
+Make a folder with your sample name, e.g. "CRR516137". In the folder, save your cellranger raw and filtered files in a folder named "cellranger".
+Set your sample directory.
+Set your sample name (i). 
+The QC pipeline will make 3 folders along in the sample directory, including soupx, doublet removal, and QC.
+
+
+```{r}
+set.seed(1234)
+exercise_dir <- "~/Mouse_data/CRR516137_YE/"
+i <- "YE"
+```
+
+# 1. Removing ambient RNA with Soupx
+## ref: https://cellgeni.github.io/notebooks/html/new-10kPBMC-SoupX.html
+This part was not preformed by innovation paper.
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(exercise_dir)
+getwd()
+
+#For ambient RNA removal we need both raw and filtered matrices.
+#Filtered matrix contains droplets that contain putative cells, while raw matrix also includes empty droplets with ambient RNA (soup).
+filt.matrix <- Read10X_h5(paste0(exercise_dir,'/cellranger/filtered_feature_bc_matrix.h5'),use.names = T)
+raw.matrix  <- Read10X_h5(paste0(exercise_dir,'/cellranger/raw_feature_bc_matrix.h5'),use.names = T)
+
+#We make a Seurat object from the sparce matrix as follows:
+tmp  <- CreateSeuratObject(counts = filt.matrix)
+
+#soup.channel creates a SoupChannel object that contains everything related to the soup estimation of a single channel.
+#This is just a list with some special properties, storing all the information associated with a single 10X channel.
+soup.channel  <- SoupChannel(raw.matrix, filt.matrix)
+
+#SoupX requires clusters in order to define marker genes.
+tmp <- SCTransform(tmp, verbose = F)
+tmp <- RunPCA(tmp, verbose = F)
+tmp <- RunUMAP(tmp, dims = 1:30, verbose = F)
+tmp <- FindNeighbors(tmp, dims = 1:30, verbose = F)
+
+#tmp <- FindClusters(tmp, verbose = T)
+
+#July 18th
+tmp <- FindClusters(tmp, verbose = T, resolution = 0.8)
+
+#After clustering is obtained, it can be added to the channel using setClusters. setDR is useful for visualizations.
+meta <- tmp@meta.data
+umap <- tmp@reductions$umap@cell.embeddings
+soup.channel  <- setClusters(soup.channel, setNames(meta$seurat_clusters, rownames(meta)))
+soup.channel  <- setDR(soup.channel, umap)
+
+#With defined clusters, run the main SoupX function, calculating ambient RNA profile.
+soup.channel  <- autoEstCont(soup.channel)
+
+#Genes with highest expression in background. These are often enriched for ribosomal proteins.
+head(soup.channel$soupProfile[order(soup.channel$soupProfile$est, decreasing = T), ], n = 20)
+
+#We will use roundToInt option to make sure we output integer matrix.
+adj.matrix  <- adjustCounts(soup.channel, roundToInt = T)
+
+#save the results
+DropletUtils:::write10xCounts(paste0(exercise_dir,"soupX_filt"), adj.matrix)
+```
+
+# 2. Removing doublets with doubletfinder
+
+```{r}
+getwd()
+
+dir.create(paste0(exercise_dir,"doublets"))
+knitr::opts_chunk$set(echo = TRUE)
+setwd(paste0(exercise_dir,"doublets"))
+getwd()
+
+tmp <- Read10X(paste0(exercise_dir,'soupx_filt'))
+# initial qc for doubletfinder
+tmp <- CreateSeuratObject(counts = tmp, min.cells = 3, min.features = 200, project = i)
+tmp$sample <- i
+
+# Pre-process seurat object with standard seurat workflow
+tmp <- NormalizeData(tmp)
+tmp <- FindVariableFeatures(tmp)
+tmp <- ScaleData(tmp)
+tmp <- RunPCA(tmp, nfeatures.print = 10)
+  
+# finish pre-processing
+tmp <- RunUMAP(tmp, dims = 1:30)
+tmp <- FindNeighbors(object = tmp, dims = 1:30)              
+#tmp <- FindClusters(object = tmp, resolution = 0.1)
+
+#July 18th
+tmp <- FindClusters(object = tmp, resolution = 0.8)
+
+  
+# pK identification (no ground-truth) / takes few minutes
+sweep.list <- paramSweep(tmp, PCs = 1:30)
+sweep.stats <- summarizeSweep(sweep.list, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+plot <- ggplot(bcmvn, aes(pK, BCmetric)) +
+    geom_point()
+ggsave(plot, filename = paste0(exercise_dir,"doublets/pK_BCmetric.pdf"))
+
+# Optimal pK is the max of the bomodality coefficent (BCmvn) distribution
+bcmvn.max <- bcmvn[which.max(bcmvn$BCmetric),]
+optimal.pk <- bcmvn.max$pK
+optimal.pk <- as.numeric(levels(optimal.pk))[optimal.pk]
+  
+# Homotypic doublet proportion estimate
+annotations <- tmp@meta.data$seurat_clusters
+homotypic.prop <- modelHomotypic(annotations) 
+nExp.poi <- round(optimal.pk * nrow(tmp@meta.data)) ## Assuming 7.5% doublet formation rate
+nExp.poi.adj <- round(nExp.poi * (1 - homotypic.prop))
+  
+# run DoubletFinder
+tmp <- doubletFinder(seu = tmp, 
+                     PCs = 1:30, 
+                     pN = 0.25,
+                     pK = optimal.pk,
+                     nExp = nExp.poi.adj)
+metadata <- tmp@meta.data
+colnames(metadata)[8] <- "doublet_finder"
+colnames(metadata)[7] <- "doublet_score"
+tmp@meta.data <- metadata 
+
+pdf(paste0(exercise_dir,"doublets/",i,"_before_dbrm.pdf"))
+plot(metadata$nFeature_RNA, metadata$doublet_score)
+abline(v=c(500,4000), col=c("red", "red"), lty=c(2,2), lwd=c(3, 3)) #not working here
+dev.off()
+
+# Calculate number of doublets and singlets
+summary <- as.data.frame(table(metadata$doublet_finder))
+colnames(summary) <- c("Classification", "Droplet N")
+write_delim(summary, paste0(exercise_dir,"doublets/DoubletFinder_doublet_summary.tsv"), "\t")
+
+# subset and save
+tmp.singlets <- subset(tmp, doublet_finder == "Singlet")
+metadata <- tmp.singlets@meta.data
+colnames(metadata)[7] <- "doublet_score"
+
+pdf(paste0(exercise_dir,"doublets/",i,"_after_dbrm.pdf"))
+plot(metadata$nFeature_RNA, metadata$doublet_score)
+abline(v = c(500,4000), col=c("red", "red"), lty=c(2,2), lwd=c(3, 3)) #not working here
+dev.off()
+
+#Compare
+sink(paste0(exercise_dir,"doublets/",i,"_bf_rm_doublets.txt"))
+print(tmp) #not seeing anything here
+sink() #what is this?
+
+sink(paste0(exercise_dir,"doublets/",i,"_aft_rm_doublets.txt"))
+print(tmp.singlets)
+sink()
+
+saveRDS(tmp.singlets, file = paste0(exercise_dir,"doublets/",i,"_after_dbrm.rds"))
+```
+
+# 3. Quality control based on mt genes, ribosomomal pr, and gene no.
+
+There is no ribosomal protein in the innovation paper dataset.
+
+```{r}
+getwd()
+
+dir.create(paste0(exercise_dir,"qc"))
+knitr::opts_chunk$set(echo = TRUE)
+setwd(paste0(exercise_dir,"qc"))
+getwd()
+
+tmp <- tmp.singlets
+tmp$sample <- i
+Idents(tmp) <- i
+
+tmp[["percent.mt"]] <- PercentageFeatureSet(tmp, pattern = "^mt-")
+grep("^rp-",rownames(data),value = TRUE)
+
+# plots before QC
+p <- VlnPlot(tmp, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+ggsave(paste0(exercise_dir,"qc/",i,"_before_qc_vln.pdf"), plot = p, width = 10, height = 6)
+plot1 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3 <- plot1 + plot2
+ggsave(paste0(exercise_dir,"qc/",i,"_before_qc_Scatter.pdf"),plot = plot3, width = 8, height = 4)
+saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_before_qc.rds"))
+
+# set the threshold for mitochondrial gene ratio and gene number.
+tmp <- subset(tmp, subset = percent.mt < 10 & nFeature_RNA > 500 & nFeature_RNA < 4000)
+
+# plots after QC
+p <- VlnPlot(tmp, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+ggsave(paste0(exercise_dir,"qc/",i,"_after_qc_vln.pdf"), plot = p, width = 10, height = 6)
+plot1 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3 <- plot1 + plot2
+ggsave(paste0(i,"_after_qc_Scatter.pdf"),plot = plot3, width = 8, height = 4)
+saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_after_qc.rds"))
+
+#what is this?
+tmp <- RenameCells(tmp, add.cell.id = i)
+```
+
+Notes:
+using SCTransform vs the normal seurat QC normalization and dimensionality reduction
+```{r}
+# normalization
+tmp <- SCTransform(tmp, verbose = FALSE)
+
+saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_SCT.rds"))
+
+# PCA plot
+tmp <- RunPCA(tmp, verbose=F)
+pdf(paste0(exercise_dir,"qc/",i,"_pca_heatmap.pdf"), width=10,height=20)
+DimHeatmap(tmp, dims=1:30, cells=500, balanced=T) #Error in plot.new() : figure margins too large
+dev.off() #Error in dev.off() : cannot shut down device 1 (the null device)
+
+# Elbow plot
+p<- ElbowPlot(tmp, ndims = 30)
+pdf(paste0(exercise_dir,"qc/",i,"_ElbowPlot.pdf"), height = 6, width = 7)
+print(p)
+dev.off()
+  
+saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_bfPCR.rds"))
+
+assign(i, tmp)
+
+# Clustering
+tmp <- readRDS(file = paste0(exercise_dir,"qc/",i,"_bfPCR.rds"))
+## should I run UMAP before of after FindNeighbors and FindClusters?
+tmp <- RunUMAP(tmp, dims = 1:30, verbose=F)
+tmp <- FindNeighbors(tmp, reduction = "pca", dims = 1:30)
+tmp <- FindClusters(tmp, res=0.8)
+tmp[["cluster"]] <- Idents(tmp)
+UMAP <- DimPlot(object = tmp, reduction = "umap", label = TRUE)
+ggsave(paste0(exercise_dir,"qc/",i,"_umap.pdf"), plot = UMAP, width = 8, height = 6)
+saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_afPCR.rds"))
+
+sink(paste0(exercise_dir,"qc/afte_qc_cell_feature.txt"))
+print(tmp)
+sink()
+
+```
+
+Refine pipeline: identifying cell cycle genes 
+
