@@ -1,0 +1,241 @@
+---
+title: "Pseudo-Bulk"
+output: html_document
+date: "2024-07-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+BiocManager::install("DESeq2")
+
+library(BiocManager)
+library(Seurat)
+library(dplyr)
+library(tibble)
+library(DESeq2)
+
+
+```
+
+```{r}
+integ_dir <- '/Users/josietuong/from_server/integ/'
+setwd(integ_dir)
+```
+
+
+#Using DESeq2
+```{r}
+seu_ob <- readRDS(file = paste0(integ_dir,"annotation_singleR.rds"))
+
+DefaultAssay(seu_ob)
+
+counts <- AggregateExpression(seu_ob, group.by = c('sample', "singleR.labels"), assays = 'RNA', 
+                              slot = "counts",
+                              return.seurat = FALSE)
+counts <- counts$RNA
+
+counts.t <- t(counts)
+
+counts.t <- as.data.frame(counts.t)
+
+splitRows <- gsub('.*_', '', rownames(counts.t))
+
+counts.split <- split.data.frame(counts.t, 
+                            f=factor(splitRows))
+
+counts.split.modified <- lapply(counts.split, function(x){
+  rownames(x) <- gsub('(.*)_.*', "\\1", rownames(x))
+  t(x)
+  
+})
+
+counts_monocytes <- counts.split.modified$Monocytes
+
+colData <- data.frame(samples = colnames(counts_monocytes))
+
+colData <- colData %>%
+  mutate(condition = ifelse(grepl('C', samples), 'Control', 'Exercised'))
+  
+colData <- colData %>%
+  mutate(age = ifelse(grepl('Y', samples), 'Young', 'Old')) 
+  column_to_rownames(var = 'samples')
+
+# by condition: Control vs Exercise  
+dds_con <- DESeqDataSetFromMatrix(countData = counts_monocytes,
+                       colData = colData,
+                       design = ~ condition)
+
+keep <- rowSums(counts(dds_con)) >=10
+dds_con <- dds_con[keep,]
+
+dds_con <- DESeq(dds_con)
+
+# by age: Young vs Old
+dds_age <- DESeqDataSetFromMatrix(countData = counts_monocytes,
+                       colData = colData,
+                       design = ~ age)
+
+keep <- rowSums(counts(dds_age)) >=10
+dds_age <- dds_age[keep,]
+
+dds_age <- DESeq(dds_age)
+
+
+resultsNames(dds_con)
+
+res_con <- results(dds_con, name = "condition_Exercised_vs_Control")
+res_con
+write.csv(res_con,file=paste("~/Mouse_data/","DESeq2_Ex_vs_Ctl.csv",sep=""))
+summary(res_con)
+
+resultsNames(dds_age)
+
+res_age <- results(dds_age, name = "age_Young_vs_Old")
+res_age
+
+
+summary(res_age)
+
+plotMA(res_age)
+
+```
+
+Innovation paper method
+stumbled into error with endothelial cells 
+```{r}
+singleR.labels <- unique(seu_ob@meta.data$singleR.labels)
+
+Aging_DEGs <- data.frame()
+Y_EX_DEGs <- data.frame()
+O_EX_DEGs <- data.frame()
+
+Idents(seu_ob) <- paste(seu_ob$singleR.labels, seu_ob$sample, sep='_')
+print(unique(Idents(seu_ob)))
+
+
+for (cell in singleR.labels){
+  tmp <- FindMarkers(seu_ob, ident.1=paste0(cell, '_OC_blood'), ident.2=paste0(cell, '_YC_blood'))
+  tmp$gene <- rownames(tmp)
+  tmp$celltype <- cell
+  tmp$compare <- 'Aging_DEGs'
+  Aging_DEGs <- rbind(Aging_DEGs, tmp)
+    print(paste0(cell, ' is finished'))
+}
+write.csv(Aging_DEGs,file=paste("~/Mouse_data/","Aging.csv",sep=""))
+Aging_DEGs.deg <- subset(Aging_DEGs, p_val_adj<0.05 & abs(avg_log2FC)>0.25)
+write.csv(Aging_DEGs.deg,file=paste("~/Mouse_data/","Aging_DEGs.csv",sep=""))
+
+for (cell in singleR.labels){
+  tmp <- FindMarkers(seu_ob, ident.1=paste0(cell, '_YE_blood'), ident.2=paste0(cell, '_YC_blood'))
+  tmp$gene <- rownames(tmp)
+  tmp$celltype <- cell
+  tmp$compare <- 'Y_EX_DEGs'
+  Y_EX_DEGs <- rbind(Y_EX_DEGs, tmp)
+    print(paste0(cell, ' is finished'))
+}
+write.csv(Y_EX_DEGs,file=paste("~/Mouse_data/","Y_EX.csv",sep=""))
+Y_EX_DEGs.deg <- subset(Y_EX_DEGs, p_val_adj<0.05 & abs(avg_log2FC)>0.25)
+write.csv(Y_EX_DEGs.deg,file=paste("~/Mouse_data/","Y_EX_DEGs.csv",sep=""))
+
+for (cell in singleR.labels){
+  tmp <- FindMarkers(seu_ob, ident.1=paste0(cell, '_OE_blood'), ident.2=paste0(cell, '_OC_blood'))
+  tmp$gene <- rownames(tmp)
+  tmp$celltype <- cell
+  tmp$compare <- 'O_EX_DEGs'
+  O_EX_DEGs <- rbind(O_EX_DEGs, tmp)
+    print(paste0(cell, ' is finished'))
+}
+write.csv(O_EX_DEGs,file=paste("~/Mouse_data/","O_EX.csv",sep=""))
+O_EX_DEGs.deg <- subset(O_EX_DEGs, p_val_adj<0.05 & abs(avg_log2FC)>0.25)
+write.csv(O_EX_DEGs.deg,file=paste("~/Mouse_data/","O_EX_DEGs.csv",sep=""))
+```
+
+Limma
+```{r}
+install.packages('limma')
+install.packages("writexl")
+BiocManager::install("topGO")
+library(limma)
+library(edgeR)
+library(topGO)
+library(org.Mm.eg.db)
+library(writexl)
+```
+
+```{r}
+seu_ob
+# Example if the cell type information is stored in the 'cell_type' column
+Idents(seu_ob) <- "singleR.labels"
+
+library(limma)
+mono <- subset(seu_ob, idents = 'Monocytes')
+expr <- as.matrix(GetAssayData(mono))
+
+# Filter out genes that are 0 for every cell in this cluster
+bad <- which(rowSums(expr) == 0)
+expr <- expr[-bad,]
+
+mm <- model.matrix(~0 + orig.ident, data = mono@meta.data)
+fit <- lmFit(expr, mm)  
+head(coef(fit)) # means in each sample for each gene
+
+contr <- makeContrasts(orig.identOC_blood - orig.identOE_blood, levels = colnames(coef(fit)))
+tmp <- contrasts.fit(fit, contrasts = contr)
+tmp <- eBayes(tmp)
+
+top_DEGs <- topTable(tmp, sort.by = "P", n = 20) # top 20 DE genes
+top_DEGs
+
+# If gene names are row names, convert them to a column
+top_DEGs$Gene <- rownames(top_DEGs)
+top_DEGs <- top_DEGs[, c("Gene", setdiff(colnames(top_DEGs), "Gene"))]
+
+# Extract coefficients, statistics, and gene names from tmp
+coefficients <- coef(tmp)  # Coefficients
+statistics <- topTable(tmp, sort.by = "P", n = Inf)  # All DEGs sorted by p-value
+gene_names <- rownames(statistics)  # Gene names
+
+# Combine coefficients and statistics into a data frame
+results <- cbind(gene = gene_names, as.data.frame(coefficients), as.data.frame(statistics))
+
+
+
+# Export to CSV
+write.csv(top_DEGs, file = "limma_DEGs_mono.csv", row.names = FALSE)
+write.csv(results, file = "Limma_all_DEGs_mono.csv", row.names = FALSE)
+
+```
+
+
+
+GO enrichement in a cluster
+```{r}
+# install org.Mm.eg.db from Bioconductor if not already installed (for mouse only)
+mono <- subset(seu_ob, idents = 'Monocytes')
+expr <- as.matrix(GetAssayData(mono))
+# Select genes that are expressed > 0 in at least 75% of cells (somewhat arbitrary definition)
+n.gt.0 <- apply(expr, 1, function(x)length(which(x > 0)))
+expressed.genes <- rownames(expr)[which(n.gt.0/ncol(expr) >= 0.75)]
+all.genes <- rownames(expr)
+
+# define geneList as 1 if gene is in expressed.genes, 0 otherwise
+geneList <- ifelse(all.genes %in% expressed.genes, 1, 0)
+names(geneList) <- all.genes
+
+# Create topGOdata object
+	GOdata <- new("topGOdata",
+		ontology = "BP", # use biological process ontology
+		allGenes = geneList,
+		geneSelectionFun = function(x)(x == 1),
+              annot = annFUN.org, mapping = "org.Mm.eg.db", ID = "symbol")
+
+# Test for enrichment using Fisher's Exact Test
+	resultFisher <- runTest(GOdata, algorithm = "elim", statistic = "fisher")
+	
+	GenTable(GOdata, Fisher = resultFisher, topNodes = 20, numChar = 60)
+```
+
+
