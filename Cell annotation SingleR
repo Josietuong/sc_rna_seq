@@ -1,0 +1,420 @@
+---
+title: "Cell type ann celldex"
+author: "Milad Vahedi"
+date: "2024-06-24"
+output: html_document
+---
+Run this script on server - the seurat object is too big for running on local RAM
+
+deactivate conda, set your directory, 
+```{UNIX}
+conda deactivate
+cd /scratch/st-gkoelwyn-1/milad/seurat
+module load apptainer
+apptainer shell -unsquash bioconductor_docker_latest.sif #why is the -unsquash command?
+R
+```
+set the lib path
+```{r}
+.libPaths('/scratch/st-gkoelwyn-1/milad/seurat/Rlib')
+```
+load libraries
+```{r}
+install.packages('Seurat')
+install.packages('ggsci')
+install.packages('clustermole')
+ilBiocManager::install('singscore')
+BiocManager::install("GSEABase", force = TRUE)
+BiocManager::install("GSVA")
+#BiocManager::install('presto')
+install.packages("reticulate")
+py_install("presto")
+BiocManager::install('SingleR')
+BiocManager::install('celldex')
+BiocManager::install('cowplot', force = TRUE)
+install.packages('viridis')
+install.packages('pheatmap')
+BiocManager::install('scran')
+BiocManager::install('scater')
+
+# Load Seurat
+library(Seurat)
+
+
+library(BiocManager)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(ggsci)
+library(clustermole)
+library(future)
+#library(presto)
+library(reticulate)
+presto <- import("presto")
+library(viridis)
+library(pheatmap)
+library(scran)
+
+library(SingleR)
+library(celldex)
+library(cowplot)
+set.seed(2)
+```
+
+Set your directory
+
+```{r}
+integ_dir <- "/Users/josietuong/from_server/integ/"
+setwd(integ_dir)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Data
+
+```{r}
+Tissue <- readRDS(file = paste0(integ_dir,"umap.rds"))
+DefaultAssay(Tissue) <- "RNA"
+Tissue <- NormalizeData(object = Tissue, normalization.method = "LogNormalize")
+Tissue <- JoinLayers(Tissue)
+```
+
+
+```{r}
+library(celldex)
+ref_immgen <- celldex::ImmGenData()
+ref_immgen
+```
+Now let’s see what each of the labels look like. From the main labels, we can see that we get general cell types such as Macrophages and Monocytes.
+```{r}
+head(ref_immgen$label.main, n=10)
+```
+From the fine labels, we can see that we start to subtype the more general cell types we saw above. So rather than seeing 6 labels for Macrophages we now see specific Macrophage types such as Macrophages (MF.11C-11B+).
+```{r}
+head(ref_immgen$label.fine, n=10)
+```
+From the ont labels, we can see that we start to subtypes are now mapped to Cell Ontology IDs.
+```{r}
+head(ref_immgen$label.ont, n=10)
+```
+Applying the immgen cell reference to our data
+```{r}
+predictions.main = SingleR(test = GetAssayData(Tissue), 
+                      ref = ref_immgen,
+                      labels = ref_immgen$label.main, de.method = 'wilcox')
+
+#saving the labels in the Seurat object
+Tissue$singleR.labels <- predictions.main$labels[match(rownames(Tissue@meta.data), rownames(predictions.main))]
+saveRDS(Tissue, paste0(integ_dir, "annotation_singleR.rds"))
+
+predictions.fine = SingleR(test = GetAssayData(Tissue), 
+                           ref = ref_immgen,
+                           labels = ref_immgen$label.fine)
+#saveRDS(predictions.fine, paste0(integ_dir, "prediction_fine.rds"))
+```
+
+The scores column contains a matrix for each barcode that corresponds to to how confident SingleR is in assigning each cell type to the barcode for that row. The labels column is the most confident assignment singleR has for that particular barcode. The delta column contains the “delta” value for each cell, which is the gap, or the difference between the score for the assigned label and the median score across all labels. If the delta is small, this indicates that the cell matches all labels with the same confidence, so the assigned label is not very meaningful. SingleR can discard cells with low delta values caused by (i) ambiguous assignments with closely related reference labels and (ii) incorrect assignments that match poorly to all reference labels – so in the pruned.labels column you will find “cleaner” or more reliable labels.
+
+Seeing what are the types of cells seeing in the dataset
+```{r}
+unique(predictions.main$pruned.labels)
+```
+
+```{r}
+table(predictions.main$pruned.labels)
+table(predictions.main$labels)
+```
+
+TRUE = cells that are not assigned a pruned label
+
+```{r}
+summary(is.na(predictions.main$pruned.labels))
+```
+Are there more or less pruned labels for the fine labels?
+```{r}
+summary(is.na(predictions.fine$pruned.labels))
+```
+Now that we understand what the singleR dataframe looks like and what the data contains, let’s begin to visualize the data.
+
+Heatmap for DE genes in each clusters
+- seems to only help with the major clusters with lots of DE genes
+
+```{r}
+library(scater)
+collected <- list()
+all.markers <- metadata(predictions.main)$de.genes
+
+#normalized.tissue < NomarlizeData(Tisue)
+
+
+top.label <- names(sort(table(predictions.main$labels), decreasing=TRUE))
+
+sce <- as.SingleCellExperiment(Tissue)
+
+sce <- logNormCounts(sce)
+
+
+per.label <- sumCountsAcrossCells(logcounts(sce), 
+    ids=predictions.main$labels, average=TRUE)
+
+  
+for (label in top.label) {
+  current.label <- label
+  
+  # Get unique markers for the current label
+  markers <- unique(unlist(all.markers[[current.label]]))
+  
+  # Check which markers are valid row names in per.label
+  valid.markers <- markers[markers %in% rownames(per.label)]
+  
+  if (length(valid.markers) == 0) {
+    print(paste('No valid markers found for', as.character(current.label)))
+    next
+  }
+  
+  # Subset per.label using valid markers
+  per.label.subset <- per.label[valid.markers, , drop = FALSE]
+  
+  # Check if there are at least 2 rows to cluster
+  if (nrow(per.label.subset) < 2) {
+    print(paste('Not enough valid markers to cluster for', as.character(current.label)))
+    next
+  }
+  
+  # Create a heatmap
+  heatmap <- pheatmap::pheatmap(per.label.subset, main=current.label)
+  
+  # Generate filename and save the heatmap
+  filename <- paste0("heatmap_DEGs_", as.character(current.label), ".pdf")
+  ggsave(filename = filename, plot = heatmap, height = 20, width = 20)
+  
+  # Print confirmation message
+  print(paste('saved heatmap for', as.character(current.label)))
+}
+
+
+```
+from console:
+[1] "saved heatmap for B cells"
+[1] "saved heatmap for T cells"
+[1] "No valid markers found for Neutrophils"
+[1] "saved heatmap for Monocytes"
+[1] "saved heatmap for Tgd"
+[1] "saved heatmap for NK cells"
+[1] "saved heatmap for NKT"
+[1] "saved heatmap for ILC"
+[1] "saved heatmap for Basophils"
+[1] "saved heatmap for DC"
+[1] "saved heatmap for Eosinophils"
+[1] "Not enough valid markers to cluster for Macrophages"
+[1] "Not enough valid markers to cluster for Mast cells"
+[1] "saved heatmap for Epithelial cells"
+[1] "Not enough valid markers to cluster for Endothelial cells"
+[1] "No valid markers found for B cells, pro"
+[1] "saved heatmap for Stem cells"
+
+```{r}
+
+library(scater)
+library(ggplot2)
+
+collected <- list()
+all.markers <- metadata(predictions.main)$de.genes
+sce$labels <- predictions.main$labels
+
+for (lab in unique(predictions.main$labels)) 
+{
+  # Get the unique markers for the current label
+  markers <- unique(unlist(all.markers[[lab]]))
+  
+  # Print the markers being used for the current label
+  cat("Markers for label", lab, ":", markers, "\n")
+  
+  # Check if these markers are present in the dataset
+  present_markers <- markers[markers %in% rownames(sce)]
+  
+  if (length(present_markers) > 0) {
+    # Plot the heatmap if there are present markers
+    heatmap <- plotHeatmap(sce, silent=TRUE, 
+                           order_columns_by="labels", main=lab,
+                           features=present_markers)[[4]]
+    collected[[lab]] <- heatmap
+    
+    # Save the heatmap to a file
+    file_name <- paste0("heatmap_", lab, ".pdf")
+    ggsave(file_name, plot = heatmap, height = 20, width = 20)
+  } else {
+    warning(paste("No markers found for label:", lab))
+  }
+}
+
+
+
+for (lab in unique(predictions.main$labels)) {
+    collected[[lab]] <- plotHeatmap(sce, silent=TRUE, 
+        order_columns_by="labels", main=lab,
+        features=unique(unlist(all.markers[[lab]])))[[4]] 
+}
+do.call(gridExtra::grid.arrange, collected)
+
+```
+
+In singleR, delta is used for measurement of uncertainty. It assumes that there is no correlation/relevance between the given cells and the reference. Thus, the median delta across the cells with the reference. This is the baseline delta. If an assignment is confident, the delta is higher. Which means there is a confident difference between the assigned label compared to a median delta.
+```{r}
+delta_plot <- plotDeltaDistribution(predictions.main, ncol = 4, dots.on.top = FALSE)
+delta_plot_dots_on_top <- plotDeltaDistribution(predictions.main, ncol = 4, dots.on.top = TRUE)
+
+# Save the plot
+ggsave(filename = "delta_distribution_plot.pdf", plot = delta_plot, height = 10, width = 10)
+ggsave(filename = "delta_distribution_plot_dots_on_top.pdf", plot = delta_plot_dots_on_top, height = 10, width = 10)
+```
+
+
+
+```{r}
+score_heatmap_main <- plotScoreHeatmap(predictions.main)
+score_heatmap_fine <- plotScoreHeatmap(predictions.fine)
+ggsave(filename = "score_heatmap_main.pdf", plot = score_heatmap_main, height = 10, width = 10)
+ggsave(filename = "score_heatmap_fine.pdf", plot = score_heatmap_fine, height = 10, width = 10)
+```
+
+
+Checking singleR annotation with seurat clustering
+```{r}
+tab <- table(Assigned=predictions.main$labels, Clusters=Tissue$seurat_clusters)
+table_heatmap <- pheatmap(log10(tab+10), color = colorRampPalette(c('white','blue'))(10))
+ggsave(filename = 'heatmap_annotation_check.pdf', plot = table_heatmap, width = 10, height = 10)
+
+```
+
+Rather than only working with the singleR dataframe, we can add the labels to our Seurat data object as a metadata field, so let’s add the cell type labels to our seurat object.
+```{r}
+#add main labels to object
+Tissue[['immgen_singler_main']] = rep('NA', ncol(Tissue))
+Tissue$immgen_singler_main[rownames(predictions.main)] = predictions.main$labels
+
+#add fine labels to object
+Tissue[['immgen_singler_fine']] = rep('NA', ncol(Tissue))
+Tissue$immgen_singler_fine[rownames(predictions.fine)] = predictions.fine$labels
+
+#saveRDS(Tissue, paste0(integ_dir, "anno_immgen.rds"))
+```
+How do our samples differ in their relative cell composition?
+```{r}
+library(viridis)
+library(ggplot2)
+cell_composition_main <- ggplot(Tissue[[]], aes(x = orig.ident, fill = immgen_singler_main)) + geom_bar(position = "fill") + scale_fill_viridis(discrete = TRUE)
+ggsave(filename = "cell_composition_per_sample_main.pdf", plot = cell_composition_main, height = 10, width = 10)
+
+cell_composition_fine <- ggplot(Tissue[[]], aes(x = orig.ident, fill = immgen_singler_fine)) + geom_bar(position = "fill") + scale_fill_viridis(discrete = TRUE)
+ggsave(filename = "cell_composition_per_sample_fine.pdf", plot = cell_composition_fine, height = 20, width = 20)
+#pdf(paste0(integ_dir, "integ/cell_composition.pdf"), height=20, width=10)
+```
+
+We can also flip the samples and cell labels and view this data as below.
+```{r}
+sample_composition_main <- ggplot(Tissue[[]], aes(x = immgen_singler_main, fill = orig.ident)) + geom_bar(position = "fill") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_viridis(discrete = TRUE)
+ggsave(filename = "sample_composition_per_cell_type_main.pdf", plot = sample_composition_main, height = 10, width = 10)
+
+sample_composition_fine <- ggplot(Tissue[[]], aes(x = immgen_singler_fine, fill = orig.ident)) + geom_bar(position = "fill") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_viridis(discrete = TRUE)
+ggsave(filename = "sample_composition_per_cell_type_fine.pdf", plot = sample_composition_fine, height = 20, width = 20)
+
+```
+
+
+How do our cell type annotations map to our clusters we defined previously?
+
+For Plots: 
+  - non labels: 10x10
+  - labels: 20x20
+  - split: 10x40
+Immgen Main 
+```{r}
+#plotting cell types on our umaps
+cell_annotation_main <- DimPlot(Tissue, group.by = c("immgen_singler_main"))
+ggsave(filename = "cell_annotation_umap_main.pdf", plot = cell_annotation_main, height = 10, width = 10)
+
+cell_annotation_main_label <- DimPlot(Tissue, group.by = c("immgen_singler_main"), label = TRUE, label.size = 6, label.box = TRUE, repel = TRUE) + scale_colour_viridis(option = 'turbo', discrete = TRUE)
+ggsave(filename = "cell_annotation_umap_main_label.pdf", plot = cell_annotation_main_label, height = 20, width = 20)
+```
+
+Immgen Main split by samples
+```{r}
+cell_annotation_main_split_by_samples <- DimPlot(Tissue, group.by = c("immgen_singler_main"), split.by = "sample") + scale_colour_viridis(option = 'turbo', discrete = TRUE) + theme_dark()
+ggsave(filename = "cell_annotation_umap_main_split_by_sample.pdf", plot = cell_annotation_main_split_by_samples, height = 10, width = 40, limitsize = FALSE)
+```
+
+Immgen Fine
+```{r}
+cell_annotation_fine <- DimPlot(Tissue, group.by = c("immgen_singler_fine")) + NoLegend()
+ggsave(filename = "cell_annotation_umap_fine.pdf", plot = cell_annotation_fine, height = 10, width = 10)
+
+cell_annotation_fine_label <- DimPlot(Tissue, group.by = c("immgen_singler_fine"), label = TRUE, label.size = 4, label.box = TRUE, repel = TRUE ) + NoLegend() + scale_colour_viridis(option = 'turbo', discrete = TRUE)
+ggsave(filename = "cell_annotation_umap_fine_label.pdf", plot = cell_annotation_fine_label, height = 20, width = 20)
+```
+
+How do our cell annotations differ if we use a different reference set?
+
+This dataset was contributed by the Benayoun Lab that identified, downloaded and processed data sets on GEO that corresponded to sorted cell types Benayoun et al., 2019.
+
+The dataset contains 358 mouse RNA-seq samples annotated to 18 main cell types (“label.main”). These are split further into 28 subtypes (“label.fine”). The subtypes have also been mapped to the Cell Ontology as with the ImmGen reference.
+
+```{r}
+ref_mouserna <- celldex::MouseRNAseqData()
+```
+If we look at this reference, we can see that it also has the main, fine, and ont labels that we saw with the ImmGen reference.
+
+```{r}
+ref_mouserna
+```
+mouserna reference are generated from these tissues: heart, liver, cerebellum, and olfactory bulb (by 2019 Benayoun et al)
+```{r}
+predictions_mouse_main = SingleR(test = GetAssayData(Tissue), 
+                      ref = ref_mouserna,
+                      labels = ref_mouserna$label.main)
+
+predictions_mouse_fine = SingleR(test = GetAssayData(Tissue), 
+                           ref = ref_mouserna,
+                           labels = ref_mouserna$label.fine)
+
+```
+
+```{r}
+Tissue[['mouserna_singler_main']] = rep('NA', ncol(Tissue))
+Tissue$mouserna_singler_main[rownames(predictions_mouse_main)] = predictions_mouse_main$labels
+
+#add fine labels to object
+Tissue[['mouserna_singler_fine']] = rep('NA', ncol(Tissue))
+Tissue$mouserna_singler_fine[rownames(predictions_mouse_fine)] = predictions_mouse_fine$labels
+#saveRDS(Tissue, paste0(integ_dir, "integ/anno_mouserna.rds"))
+```
+Let’s visualize how the labeling of our cells differs between the main labels from ImmGen and MouseRNA.
+
+```{r}
+table(predictions_main$labels)
+```
+
+```{r}
+table(predictions_mouse_main$labels)
+```
+MouseRNA Main 
+```{r}
+cell_annotation_mouse_main <- DimPlot(Tissue, group.by = c("mouserna_singler_main"), label = TRUE, label.size = 6, label.box = TRUE, repel = TRUE) + scale_colour_viridis(option = 'turbo', discrete = TRUE)
+ggsave(filename = "cell_annotation_umap_mouse_main.pdf", plot = cell_annotation_mouse_main, height = 10, width = 10)
+cell_annotation_mouse_main_label <- DimPlot(Tissue, group.by = c("mouserna_singler_main"), label = TRUE, label.size = 6, label.box = TRUE, repel = TRUE) + scale_colour_viridis(option = 'turbo', discrete = TRUE)
+ggsave(filename = "cell_annotation_umap_mouse_main_label.pdf", plot = cell_annotation_mouse_main_label, height = 20, width = 20)
+```
+
+MouseRNA Main split by samples
+```{r}
+cell_annotation_mouse_main_split_by_samples <- DimPlot(Tissue, group.by = c("mouserna_singler_main"), split.by = "sample") + scale_colour_viridis(option = 'turbo', discrete = TRUE) + theme_dark()
+ggsave(filename = "cell_annotation_umap_mouse_main_split_by_sample.pdf", plot = cell_annotation_mouse_main_split_by_samples, height = 10, width = 40, limitsize = FALSE)
+```
+
+MouseRNA Fine
+```{r}
+cell_annotation_mouse_fine <- DimPlot(Tissue, group.by = c("mouserna_singler_fine"), label = TRUE, label.size = 6, label.box = TRUE, repel = TRUE) + scale_colour_viridis(option = 'turbo', discrete = TRUE) + scale_colour_viridis(option = 'turbo', discrete = TRUE) 
+ggsave(filename = "cell_annotation_umap_mouse_fine.pdf", plot = cell_annotation_mouse_fine, height = 10, width = 10)
+cell_annotation_mouse_fine_label <- DimPlot(Tissue, group.by = c("mouserna_singler_fine"), label = TRUE, label.size = 6, label.box = TRUE, repel = TRUE) + scale_colour_viridis(option = 'turbo', discrete = TRUE)
+ggsave(filename = "cell_annotation_umap_mouse_fine_label.pdf", plot = cell_annotation_mouse_fine_label, height = 20, width = 20)
+
+```
