@@ -1,0 +1,548 @@
+---
+title: "ScRNAseq_pipeline"
+output: html_document
+date: "2024-07-26"
+--- 
+
+## Connecting to server
+```{UNIX}
+#Use Ctrl+Alt+Ent to run the code in the terminal
+ssh jtuong@sockeye.arc.ubc.ca
+
+#Change directory to directory that has the .sif file
+conda deactivate
+cd /scratch/st-gkoelwyn-1/milad/seurat
+module load apptainer
+apptainer shell bioconductor_docker_latest.sif
+R
+
+#Set the library Path to the Rlib
+.libPaths('/scratch/st-gkoelwyn-1/milad/seurat/Rlib')
+
+```
+
+
+## Installing Packages
+
+
+
+## Loading libraries
+```{r}
+# For Quality Control
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(DoubletFinder)
+library(future)
+library(RColorBrewer)
+library(SeuratData)
+library(patchwork)
+library(SoupX)
+library(readr)
+library(DropletUtils)
+
+# For Integration
+library(Rserve)
+
+# For cell Annotation
+library(ggsci)
+library(SingleR)
+library(celldex)
+library(cowplot)
+set.seed(2)
+
+# For DEGs
+library(MAST)
+```
+
+## 1. Quality Control 
+This is after alignment. 
+On local, make a folder with your sample name. Inside that folder, make a file named "cellranger" and save the raw and filtered counts obtained from cellranger
+This QC will make 3 additional folders, soupx, doublet and qc. 
+
+```{r}
+# set.seed for reproducibility
+set.seed(1234)
+exercise_dir <- "~/Mouse_data/CRR516134_OC/"
+i <- "OC"
+```
+
+## 1a. Removing ambient RNA with Soupx
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(exercise_dir)
+getwd()
+
+#For ambient RNA removal we need both raw and filtered matrices.
+#Filtered matrix contains droplets that contain putative cells, while raw matrix also includes empty droplets with ambient RNA (soup).
+filt.matrix <- Read10X_h5(paste0(exercise_dir,'/cellranger/filtered_feature_bc_matrix.h5'),use.names = T)
+raw.matrix  <- Read10X_h5(paste0(exercise_dir,'/cellranger/raw_feature_bc_matrix.h5'),use.names = T)
+
+#We make a Seurat object from the sparce matrix as follows:
+tmp  <- CreateSeuratObject(counts = filt.matrix)
+
+#soup.channel creates a SoupChannel object that contains everything related to the soup estimation of a single channel.
+#This is just a list with some special properties, storing all the information associated with a single 10X channel.
+soup.channel  <- SoupChannel(raw.matrix, filt.matrix)
+
+#SoupX requires clusters in order to define marker genes.
+tmp <- SCTransform(tmp, verbose = F)
+tmp <- RunPCA(tmp, verbose = F)
+tmp <- RunUMAP(tmp, dims = 1:30, verbose = F)
+tmp <- FindNeighbors(tmp, dims = 1:30, verbose = F)
+tmp <- FindClusters(tmp, verbose = T, resolution = 0.8)
+
+#After clustering is obtained, it can be added to the channel using setClusters. setDR is useful for visualizations.
+meta <- tmp@meta.data
+umap <- tmp@reductions$umap@cell.embeddings
+soup.channel  <- setClusters(soup.channel, setNames(meta$seurat_clusters, rownames(meta)))
+soup.channel  <- setDR(soup.channel, umap)
+
+#With defined clusters, run the main SoupX function, calculating ambient RNA profile.
+soup.channel  <- autoEstCont(soup.channel)
+
+#Genes with highest expression in background. These are often enriched for ribosomal proteins.
+head(soup.channel$soupProfile[order(soup.channel$soupProfile$est, decreasing = T), ], n = 20)
+
+#We will use roundToInt option to make sure we output integer matrix.
+adj.matrix  <- adjustCounts(soup.channel, roundToInt = T)
+
+#save the results
+DropletUtils:::write10xCounts(paste0(exercise_dir,"soupX_filt"), adj.matrix)
+```
+
+## 1b. Removing doublets with doubletfinder
+
+```{r}
+dir.create(paste0(exercise_dir,"doublets"))
+knitr::opts_chunk$set(echo = TRUE)
+setwd(paste0(exercise_dir,"doublets"))
+getwd()
+
+tmp <- Read10X(paste0(exercise_dir,'soupx_filt'))
+
+# filter out clusters with less than 3 cells and low expression/features
+tmp <- CreateSeuratObject(counts = tmp, min.cells = 3, min.features = 200, project = i)
+tmp$sample <- i
+
+# Pre-process seurat object with standard seurat workflow
+tmp <- NormalizeData(tmp)
+tmp <- FindVariableFeatures(tmp)
+tmp <- ScaleData(tmp)
+tmp <- RunPCA(tmp, nfeatures.print = 10)
+  
+# finish pre-processing
+tmp <- RunUMAP(tmp, dims = 1:30)
+tmp <- FindNeighbors(object = tmp, dims = 1:30)              
+tmp <- FindClusters(object = tmp, resolution = 0.8)
+
+  
+# pK identification (no ground-truth) / takes few minutes
+sweep.list <- paramSweep(tmp, PCs = 1:30)
+sweep.stats <- summarizeSweep(sweep.list, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+plot <- ggplot(bcmvn, aes(pK, BCmetric)) +
+    geom_point()
+ggsave(plot, filename = paste0(exercise_dir,"doublets/pK_BCmetric.pdf"))
+
+# Optimal pK is the max of the bomodality coefficent (BCmvn) distribution
+bcmvn.max <- bcmvn[which.max(bcmvn$BCmetric),]
+optimal.pk <- bcmvn.max$pK
+optimal.pk <- as.numeric(levels(optimal.pk))[optimal.pk]
+  
+# Homotypic doublet proportion estimate
+annotations <- tmp@meta.data$seurat_clusters
+homotypic.prop <- modelHomotypic(annotations) 
+nExp.poi <- round(optimal.pk * nrow(tmp@meta.data)) ## Assuming 7.5% doublet formation rate
+nExp.poi.adj <- round(nExp.poi * (1 - homotypic.prop))
+  
+# run DoubletFinder
+tmp <- doubletFinder(seu = tmp, 
+                     PCs = 1:30, 
+                     pN = 0.25,
+                     pK = optimal.pk,
+                     nExp = nExp.poi.adj)
+metadata <- tmp@meta.data
+colnames(metadata)[8] <- "doublet_finder"
+colnames(metadata)[7] <- "doublet_score"
+tmp@meta.data <- metadata 
+
+pdf(paste0(exercise_dir,"doublets/",i,"_before_dbrm.pdf"))
+plot(metadata$nFeature_RNA, metadata$doublet_score)
+abline(v=c(500,4000), col=c("red", "red"), lty=c(2,2), lwd=c(3, 3)) #not working here
+dev.off()
+
+# Calculate number of doublets and singlets
+summary <- as.data.frame(table(metadata$doublet_finder))
+colnames(summary) <- c("Classification", "Droplet N")
+write_delim(summary, paste0(exercise_dir,"doublets/DoubletFinder_doublet_summary.tsv"), "\t")
+
+# subset and save
+tmp.singlets <- subset(tmp, doublet_finder == "Singlet")
+metadata <- tmp.singlets@meta.data
+colnames(metadata)[7] <- "doublet_score"
+
+pdf(paste0(exercise_dir,"doublets/",i,"_after_dbrm.pdf"))
+plot(metadata$nFeature_RNA, metadata$doublet_score)
+abline(v = c(500,4000), col=c("red", "red"), lty=c(2,2), lwd=c(3, 3)) #not working here
+dev.off()
+
+#Compare
+sink(paste0(exercise_dir,"doublets/",i,"_bf_rm_doublets.txt"))
+print(tmp) #not seeing anything here
+sink() #what is this?
+
+sink(paste0(exercise_dir,"doublets/",i,"_aft_rm_doublets.txt"))
+print(tmp.singlets)
+sink()
+
+saveRDS(tmp.singlets, file = paste0(exercise_dir,"doublets/",i,"_after_dbrm.rds"))
+```
+
+## 1c. Quality Control for mitochondria genes, ribosomal proteins and gene numbers
+
+```{r}
+dir.create(paste0(exercise_dir,"qc"))
+knitr::opts_chunk$set(echo = TRUE)
+setwd(paste0(exercise_dir,"qc"))
+getwd()
+
+tmp <- tmp.singlets
+tmp$sample <- i
+Idents(tmp) <- i
+
+tmp[["percent.mt"]] <- PercentageFeatureSet(tmp, pattern = "^mt-")
+grep("^rp-",rownames(data),value = TRUE)
+
+# plots before QC
+p <- VlnPlot(tmp, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+ggsave(paste0(exercise_dir,"qc/",i,"_before_qc_vln.pdf"), plot = p, width = 10, height = 6)
+plot1 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3 <- plot1 + plot2
+ggsave(paste0(exercise_dir,"qc/",i,"_before_qc_Scatter.pdf"),plot = plot3, width = 8, height = 4)
+
+#uncomment this when needed - saving rds takes space
+#saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_before_qc.rds"))
+
+# set the threshold for mitochondrial gene ratio and gene number.
+tmp <- subset(tmp, subset = percent.mt < 10 & nFeature_RNA > 500 & nFeature_RNA < 4000)
+
+# plots after QC
+p <- VlnPlot(tmp, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+ggsave(paste0(exercise_dir,"qc/",i,"_after_qc_vln.pdf"), plot = p, width = 10, height = 6)
+plot1 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(tmp, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3 <- plot1 + plot2
+ggsave(paste0(i,"_after_qc_Scatter.pdf"),plot = plot3, width = 8, height = 4)
+
+#uncomment this when needed - saving rds takes space
+#saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_after_qc.rds"))
+
+#adding the sample name (i) as a prefix to the cell 
+tmp <- RenameCells(tmp, add.cell.id = i)
+
+```
+
+## 1c. Normalizing and Scaling Data
+
+```{r}
+# normalization
+tmp <- SCTransform(tmp, verbose = FALSE)
+
+#uncomment when needed
+#saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_SCT.rds"))
+
+# PCA plot
+tmp <- RunPCA(tmp, verbose=F)
+pdf(paste0(exercise_dir,"qc/",i,"_pca_heatmap.pdf"), width=10,height=20)
+DimHeatmap(tmp, dims=1:30, cells=500, balanced=T)
+dev.off() 
+
+# Elbow plot
+p<- ElbowPlot(tmp, ndims = 30)
+pdf(paste0(exercise_dir,"qc/",i,"_ElbowPlot.pdf"), height = 6, width = 7)
+print(p)
+dev.off()
+ 
+#uncomment with needed 
+#saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_bfPCR.rds"))
+
+assign(i, tmp)
+
+# Clustering
+
+#uncomment this line as needed
+#tmp <- readRDS(file = paste0(exercise_dir,"qc/",i,"_bfPCR.rds"))
+
+tmp <- RunUMAP(tmp, dims = 1:30, verbose=F)
+tmp <- FindNeighbors(tmp, reduction = "pca", dims = 1:30)
+tmp <- FindClusters(tmp, res=0.8)
+tmp[["cluster"]] <- Idents(tmp)
+UMAP <- DimPlot(object = tmp, reduction = "umap", label = TRUE)
+ggsave(paste0(exercise_dir,"qc/",i,"_umap.pdf"), plot = UMAP, width = 8, height = 6)
+
+saveRDS(tmp, file = paste0(exercise_dir,"qc/",i,"_afPCR.rds"))
+
+sink(paste0(exercise_dir,"qc/afte_qc_cell_feature.txt"))
+print(tmp)
+sink()
+```
+
+## 2. Integrating Samples
+Make a new directory called 'integration'. In 'integration', make 'afPCR'. Copy all the afPCR.rds obtained from QC step in 'afPCR'.
+
+
+```{r}
+set.seed(1234)
+integ_dir <- "~/Mouse_data/intergration/"
+setwd(integ_dir)
+```
+
+## 2.a Integrate sample
+
+```{r}
+# Loading in samples
+samples <- c('OC', 'OE')
+for (i in c(1:2)) {
+ tmp <- readRDS(file = paste0(integ_dir,"afPCR/",samples[i],"_afPCR.rds"))
+ assign(samples[i],tmp)
+}
+```
+
+
+```{r}
+getwd()
+dir.create(paste0(integ_dir,"integ"))
+knitr::opts_chunk$set(echo = TRUE)
+setwd(paste0(integ_dir,"integ"))
+getwd()
+
+
+int.list <- list(get(samples[1]),get(samples[2]))
+
+# setup parallel analysis 
+makeClusterPSOCK(availableCores())
+plan("multicore", workers = 20)
+options(future.globals.maxSize = 1024^6^20)
+plan()
+
+
+int.features <- SelectIntegrationFeatures(object.list = int.list,
+                                          nfeatures = 3000)
+int.list <- PrepSCTIntegration(object.list = int.list, 
+                               anchor.features = int.features)
+
+# Here we actually do the integration. Seurat does it in two steps:
+# step 1: Finding the markers
+int.anchors <- FindIntegrationAnchors(object.list = int.list, 
+                                      normalization.method = "SCT",
+                                      anchor.features = int.features)
+
+#uncomment as needed
+#saveRDS(int.anchors, paste0(integ_dir, "integ/int_anchors_Old.rds"))
+
+# step 2: actual integration
+exercise <- IntegrateData(anchorset = int.anchors,
+                          normalization.method = "SCT")
+
+DefaultAssay(exercise) <- "integrated"
+
+#uncomment as needed
+#saveRDS(exercise, paste0(integ_dir, "integ/int_seu_Old.rds"))
+
+```
+
+## 2.b Visualization
+```{r}
+# basic processing and visualization of the unintegrated dataset:
+DefaultAssay(exercise) <- "RNA" 
+exercise <- NormalizeData(exercise, verbose = F)
+exercise <- FindVariableFeatures(exercise, selection.method = "vst", nfeatures = 3000, verbose = F)
+exercise <- ScaleData(exercise, verbose = F)
+
+exercise <- RunPCA(exercise,npcs = 30, verbose = FALSE)
+
+pdf(paste0(integ_dir, "integ/pca_heatmap_Old.pdf"), height=20, width=10)
+DimHeatmap(exercise, dims = 1:30, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf(paste0(integ_dir, "integ/pca_elbow_Old.pdf"), height=5, width=8)
+p <- ElbowPlot(exercise, ndims=30)
+print(p)
+dev.off()
+
+saveRDS(exercise, file = paste0(integ_dir, "integ/beforePC_Old.rds"))
+
+exercise <- RunUMAP(exercise, reduction = "pca", dims = 1:30)
+
+pdf(paste0(integ_dir, "integ/umap_sample_Old.pdf"),width=8,height=6)
+DimPlot(exercise, reduction = "umap", label = TRUE)
+DimPlot(exercise, reduction = "umap", pt.size = 0.4, group.by = "sample")
+dev.off()
+```
+
+
+```{r}
+# Now we cluster the integrated matrix and look how clusters are distributed between the 4 sets:
+exercise <- readRDS(file = paste0(integ_dir,"integ/beforePC_Old.rds"))
+
+DefaultAssay(exercise) <- "integrated" 
+
+# clustering parameters
+# min.dist = make the dots closer 
+# spread = make clusters separate from each other
+exercise <- RunUMAP(exercise, dims = 1:30) # spread=3, min.dist=0.2
+exercise <- FindNeighbors(exercise, reduction = "pca", dims = 1:30, k.param = 10)
+exercise <- FindClusters(exercise) #, resolution = 2.2)
+                         
+plot <- DimPlot(exercise, reduction = "umap", label = TRUE, pt.size = 0.1,raster = FALSE)
+ggsave(file = paste0(integ_dir,"integ/umap_Old.pdf"), plot = plot, width = 8, height = 6)
+pdf(file = paste0(integ_dir,"integ/umap_sample_single_Old.pdf"),width=28,height=12)
+DimPlot(exercise, reduction = "umap", split.by = "sample",pt.size = 0.1,label.size = 6,ncol=4,raster = FALSE)
+dev.off()
+
+table(exercise[[]]$seurat_clusters)
+
+count_table <- table(exercise@meta.data$seurat_clusters, 
+                     exercise@meta.data$orig.ident)
+write.csv(count_table, file = paste0(integ_dir,"integ/count_table_Old.csv"), row.names = F, quote = F) #try row.names = T?
+
+# to show the contribution of each sample in each cluster we need a function:
+plot_integrated_clusters = function (srat) { 
+  ## take an integrated Seurat object, plot distributions over orig.ident
+  library(Seurat)
+  library(patchwork)
+  library(ggplot2)
+  library(reshape2)
+  library(RColorBrewer)
+  
+  
+  count_table <- table(srat@meta.data$seurat_clusters, srat@meta.data$orig.ident)
+  count_mtx   <- as.data.frame.matrix(count_table)
+  count_mtx$cluster <- rownames(count_mtx)
+  melt_mtx    <- melt(count_mtx)
+  melt_mtx$cluster <- as.factor(melt_mtx$cluster)
+
+  cluster_size   <- aggregate(value ~ cluster, data = melt_mtx, FUN = sum)
+  
+  sorted_labels <- paste(sort(as.integer(levels(cluster_size$cluster)),decreasing = T))
+  cluster_size$cluster <- factor(cluster_size$cluster,levels = sorted_labels)
+  melt_mtx$cluster <- factor(melt_mtx$cluster,levels = sorted_labels)
+  
+  colnames(melt_mtx)[2] <- "dataset"
+  
+  
+  p1 <- ggplot(cluster_size, aes(y= cluster,x = value)) + geom_bar(position="dodge", stat="identity",fill = "grey60") + 
+    theme_bw() + scale_x_log10() + xlab("Cells per cluster, log10 scale") + ylab("")
+  p2 <- ggplot(melt_mtx,aes(x=cluster,y=value,fill=dataset)) + 
+    geom_bar(position="fill", stat="identity") + theme_bw() + coord_flip() + 
+    scale_fill_brewer(palette = "Set2") +
+    ylab("Fraction of cells in each dataset") + xlab("Cluster number") + theme(legend.position="top")
+  
+  p2 + p1 + plot_layout(widths = c(3,1))
+  }
+
+pdf(file = paste0(integ_dir,"integ/umap_sample_contrib_Old.pdf"),width=28,height=12)
+plot_integrated_clusters(exercise)
+dev.off()
+
+saveRDS(exercise, file = paste0(integ_dir,"integ/umap_Old.rds"))
+
+# let's see clusters in each sample separately
+Tissue <- exercise
+saveRDS(Tissue, file = paste0(integ_dir,"integ/umap_Old.rds'")) #why saving a rds' file?#
+
+pdf(paste0(integ_dir,"integ/umap_group_old.pdf"),width=8,height=6)
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample",raster=FALSE, cols= c('#E88B88','#45549A'))
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample",raster=FALSE, cols= c('#E88B88',"NA"))
+DimPlot(Tissue, reduction = "umap", pt.size = 0.1, group.by = "sample", raster=FALSE,cols= c('NA',"#45549A"))
+dev.off()
+```
+
+## 3. Cell Annotation
+
+```{r}
+# Set directory
+integ_dir <- "~/Mouse_data/intergration/integ/"
+setwd(integ_dir)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Loading in data
+Tissue <- readRDS(file = paste0(integ_dir,"umap_Old.rds"))
+DefaultAssay(Tissue) <- "integrated"
+Tissue <- NormalizeData(object = Tissue, normalization.method = "LogNormalize")
+Tissue <- JoinLayers(Tissue)
+```
+
+
+```{r}
+# Loading in reference data
+library(celldex)
+ref_immgen <- celldex::ImmGenData()
+ref_immgen
+```
+
+Actual annotation step
+```{r}
+#Applying the main immgen cell reference to the data
+predictions.main = SingleR(test = GetAssayData(Tissue), 
+                      ref = ref_immgen,
+                      labels = ref_immgen$label.main, de.method = 'wilcox')
+
+#saving the labels in the Seurat object
+Tissue$singleR.labels <- predictions.main$labels[match(rownames(Tissue@meta.data), rownames(predictions.main))]
+saveRDS(Tissue, paste0(integ_dir, "annotation_singleR.rds"))
+
+predictions.fine = SingleR(test = GetAssayData(Tissue), 
+                           ref = ref_immgen,
+                           labels = ref_immgen$label.fine)
+#saveRDS(predictions.fine, paste0(integ_dir, "prediction_fine.rds"))
+```
+
+## 3.b. Visualization
+```{r}
+#Delta Plots
+delta_plot <- plotDeltaDistribution(predictions.main, ncol = 4, dots.on.top = FALSE)
+delta_plot_dots_on_top <- plotDeltaDistribution(predictions.main, ncol = 4, dots.on.top = TRUE)
+
+# Save the plot
+ggsave(filename = "delta_distribution_plot.pdf", plot = delta_plot, height = 10, width = 10)
+ggsave(filename = "delta_distribution_plot_dots_on_top.pdf", plot = delta_plot_dots_on_top, height = 10, width = 10)
+```
+
+```{r}
+#Score Heatmap
+score_heatmap_main <- plotScoreHeatmap(predictions.main)
+score_heatmap_fine <- plotScoreHeatmap(predictions.fine)
+ggsave(filename = "score_heatmap_main.pdf", plot = score_heatmap_main, height = 10, width = 10)
+ggsave(filename = "score_heatmap_fine.pdf", plot = score_heatmap_fine, height = 10, width = 10)
+```
+
+## 4 Differential Gene Expressions
+
+Seting working dir
+```{r}
+integ_dir <- "~/Mouse_data/intergration/integ/"
+setwd(integ_dir)
+```
+
+FindMarkers using MAST and DEGSeq tesFting
+```{r}
+seu_ob <- readRDS(file = paste0(integ_dir,"annotation_singleR.rds"))
+
+Idents(seu_ob) <- "singleR.labels"
+
+mono <- subset(seu_ob, idents = "Monocytes")
+
+markers <- FindMarkers(seu_ob, test.use="MAST", ident.1 = "OC", ident.2 = "OE", group.by = "sample")
+
+write.csv(markers, file = 'FindMarkers_Mast_mono.csv', row.names = TRUE)
+```
+
+
